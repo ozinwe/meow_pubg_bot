@@ -9,9 +9,11 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from PIL import Image, ImageDraw, ImageFont
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from aiogram.filters import CommandStart
 
 API_TOKEN = os.getenv("API_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
+ADMIN_USERNAME = "sunMILANA"
 
 bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher(storage=MemoryStorage())
@@ -20,34 +22,61 @@ cap_chat_url = None
 registration_data = {}
 reserved_teams = []
 used_users = set()
-max_free_events = 2
 connected_events = {}
+
 TEMPLATE_IMAGE_PATH = "template.png"
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_SIZE = 28
 
+def is_admin(message: Message):
+    return message.from_user.id == ADMIN_ID or message.from_user.username == ADMIN_USERNAME
+
 def buy_access_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💸 Купить доступ", url="https://t.me/your_username")]
+        [InlineKeyboardButton(text="💸 Купить доступ", url="https://t.me/sunMILANA")]
     ])
 
+@dp.message(CommandStart())
+async def start(message: Message):
+    text = (
+        "👋 Привет! Я MEOW PUBG BOT 🐾\n"
+        "Я помогу тебе с регистрацией команд, вставкой результатов и проверкой пруфов.\n\n"
+        "📋 Основные команды:\n"
+        "/регистрация TEAM @капитан — зарегистрировать команду\n"
+        "/тимлист — посмотреть текущие слоты\n"
+        "Отправь шаблон + ссылку на Google Таблицу — я вставлю текст\n"
+        "/autocheck — включить авто-проверку пруфов (в группе)\n\n"
+    )
+
+    if is_admin(message):
+        text += (
+            "🔐 <b>Панель администратора:</b>\n"
+            "/setcapchat <ссылка> — установить кап-чат\n"
+            "/резерв TEAM @кап — добавить в резерв\n"
+            "/лист_рег — все регистрации\n"
+            "/лист_резерв — резерв\n"
+            "/approvechat -100123456789 — дать доступ к чату\n"
+            "/broadcast текст — сделать рассылку\n"
+            "/resetlimit — сбросить лимиты пользователей\n"
+        )
+    await message.answer(text, parse_mode="HTML")
 @dp.message(F.text.startswith("/setcapchat"))
 async def set_capchat(message: Message):
     global cap_chat_url
-    if message.from_user.id == ADMIN_ID:
-        parts = message.text.split()
-        if len(parts) == 2:
-            cap_chat_url = parts[1]
-            await message.answer("✅ Кэп-чат установлен")
+    if not is_admin(message): return
+    parts = message.text.split()
+    if len(parts) == 2:
+        cap_chat_url = parts[1]
+        await message.answer("✅ Кэп-чат установлен")
 
 @dp.message(F.text.startswith("/регистрация"))
 async def register_team(message: Message):
-    if message.from_user.id in used_users:
+    if message.from_user.id in used_users and not is_admin(message):
         await message.answer("❌ Вы уже использовали бесплатную регистрацию.", reply_markup=buy_access_keyboard())
         return
     parts = message.text.split(" ", 2)
     if len(parts) < 3:
-        await message.answer("Формат: /регистрация TEAM_NAME @cap")
+        await message.answer("Формат: /регистрация TEAM_NAME @username")
         return
     team_name, cap_username = parts[1], parts[2]
     slot = 5
@@ -97,8 +126,7 @@ async def team_list(message: Message):
 
 @dp.message(F.text.startswith("/резерв"))
 async def add_reserve(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
+    if not is_admin(message): return
     parts = message.text.split(" ", 2)
     if len(parts) < 3:
         return await message.answer("Формат: /резерв TEAM_NAME @cap")
@@ -107,24 +135,19 @@ async def add_reserve(message: Message):
 
 @dp.message(F.text == "/лист_резерв")
 async def list_reserve(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
+    if not is_admin(message): return
     text = "\n".join([f"{i+1}. {t['team']} — {t['cap']}" for i, t in enumerate(reserved_teams)])
     await message.answer(text or "Резерв пуст")
 
 @dp.message(F.text == "/лист_рег")
 async def list_reg(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
+    if not is_admin(message): return
     text = json.dumps(registration_data, indent=2, ensure_ascii=False)
     await message.answer(f"<pre>{text}</pre>", parse_mode="HTML")
-from aiogram.types import InputMediaPhoto
-from urllib.parse import urlparse
 
 @dp.message(F.photo)
 async def handle_photo_template(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return await message.answer("⛔ Только админ может отправлять шаблон.")
+    if not is_admin(message): return
     file = await bot.get_file(message.photo[-1].file_id)
     downloaded = await bot.download_file(file.file_path)
     with open("template.png", "wb") as f:
@@ -133,35 +156,29 @@ async def handle_photo_template(message: Message):
 
 @dp.message(F.text.contains("docs.google.com"))
 async def fill_image_from_sheet(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    try:
-        spreadsheet_id = message.text.split("/d/")[1].split("/")[0]
-        creds = Credentials.from_service_account_file("credentials.json", scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
-        sheet = build("sheets", "v4", credentials=creds).spreadsheets()
-        values = sheet.values().get(spreadsheetId=spreadsheet_id, range="A2:D19").execute().get("values", [])
-        img = Image.open("template.png")
-        draw = ImageDraw.Draw(img)
-        font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
-        for i, row in enumerate(values):
-            name, pos, kills, total = row + [""] * (4 - len(row))
-            y = 220 + (i % 9) * 65
-            x = 100 if i < 9 else 700
-            draw.text((x, y), f"{name}  {pos}  {kills}  {total}", font=font, fill=(255,255,255))
-        title = values[0][0] if values else "meow"
-        out_path = f"{title}_meow.png"
-        img.save(out_path)
-        await message.answer_photo(InputFile(out_path), caption=f"✅ Таблица: {title}_meow.png")
-    except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+    if not is_admin(message): return
+    spreadsheet_id = message.text.split("/d/")[1].split("/")[0]
+    creds = Credentials.from_service_account_file("credentials.json", scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+    values = build("sheets", "v4", credentials=creds).spreadsheets().values().get(spreadsheetId=spreadsheet_id, range="A2:D19").execute().get("values", [])
+    img = Image.open("template.png")
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
+    for i, row in enumerate(values):
+        name, pos, kills, total = row + [""] * (4 - len(row))
+        y = 220 + (i % 9) * 65
+        x = 100 if i < 9 else 700
+        draw.text((x, y), f"{name}  {pos}  {kills}  {total}", font=font, fill=(255,255,255))
+    title = values[0][0] if values else "meow"
+    out_path = f"{title}_meow.png"
+    img.save(out_path)
+    await message.answer_photo(InputFile(out_path), caption=f"✅ Таблица: {title}_meow.png")
 
-# === Проверка пруфов ===
 @dp.message(F.text.startswith("/autocheck"))
 async def activate_autocheck(message: Message):
     if message.chat.type != "supergroup":
-        return await message.answer("Эту команду можно использовать только в группе.")
+        return await message.answer("Только в группе.")
     connected_events[message.chat.id] = 0
-    await message.answer("✅ Автопроверка включена. Отправляйте пруфы.")
+    await message.answer("✅ Автопроверка включена")
 
 @dp.message(F.text.contains("http"))
 async def check_pruf_links(message: Message):
@@ -172,31 +189,27 @@ async def check_pruf_links(message: Message):
         return
     failed = []
     for link in links:
-        domain = urlparse(link).netloc
-        if "t.me" in domain and not "sponsor" in link:
+        if "t.me" in link and "@" not in link:
             failed.append("Telegram")
-        if "youtube.com" in domain and not "@" in link:
+        if "youtube.com" in link and not "@" in link:
             failed.append("YouTube")
-        if "instagram.com" in domain:
-            pass  # можно добавить логику
+        if "instagram.com" in link:
+            pass
     if failed:
         await message.reply(f"❌ Нет подписки на: {', '.join(set(failed))}")
     else:
         await message.reply("✅ Пруфы пройдены")
 
-# === Ограничения на подключение событий ===
 @dp.message(F.text.startswith("/approvechat"))
 async def approve_chat(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
+    if not is_admin(message): return
     chat_id = int(message.text.split()[1])
     connected_events[chat_id] = 0
-    await message.answer(f"✅ Подключён: {chat_id}")
+    await message.answer(f"✅ Подключён чат: {chat_id}")
 
 @dp.message(F.text.startswith("/broadcast"))
 async def broadcast_to_users(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
+    if not is_admin(message): return
     text = message.text.replace("/broadcast", "").strip()
     for uid in used_users:
         try:
@@ -206,11 +219,11 @@ async def broadcast_to_users(message: Message):
 
 @dp.message(F.text == "/resetlimit")
 async def reset_limits(message: Message):
-    if message.from_user.id == ADMIN_ID:
+    if is_admin(message):
         used_users.clear()
-        await message.answer("Лимиты сброшены.")
+        await message.answer("✅ Лимиты сброшены")
 
-# === Старт бота ===
+# === Запуск ===
 async def main():
     logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
